@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException, Query
 from typing import Optional
 from app.database import get_connection
 from app.models import ResidentCreate, ResidentUpdate
+from app.services.resident_merge import resolve_master_id
 
 router = APIRouter(prefix="/residents", tags=["居民管理"])
 
@@ -29,6 +30,7 @@ def create_resident(resident: ResidentCreate):
 def list_residents(
     village: Optional[str] = None,
     name: Optional[str] = None,
+    status: Optional[str] = None,
     page: int = Query(1, ge=1),
     size: int = Query(20, ge=1, le=100)
 ):
@@ -41,6 +43,9 @@ def list_residents(
     if name:
         conditions.append("name LIKE ?")
         params.append(f"%{name}%")
+    if status:
+        conditions.append("status = ?")
+        params.append(status)
 
     where_clause = " WHERE " + " AND ".join(conditions) if conditions else ""
 
@@ -70,12 +75,26 @@ def get_resident(resident_id: int):
     row = cursor.fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="居民不存在")
-    return dict(row)
+    data = dict(row)
+    # 旧编号仍可追到主档案：合并记录给出最终主档编号
+    if data.get("status") == "merged" and data.get("merged_into_id") is not None:
+        data["master_id"] = resolve_master_id(conn, resident_id)
+    else:
+        data["master_id"] = data["id"]
+    return data
 
 
 @router.put("/{resident_id}")
 def update_resident(resident_id: int, data: ResidentUpdate):
     conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT status FROM residents WHERE id = ?", (resident_id,))
+    current = cursor.fetchone()
+    if not current:
+        raise HTTPException(status_code=404, detail="居民不存在")
+    if current["status"] == "merged":
+        raise HTTPException(status_code=409, detail="合并记录不可修改")
+
     updates = []
     params = []
     for field, value in data.model_dump(exclude_unset=True).items():
@@ -90,12 +109,8 @@ def update_resident(resident_id: int, data: ResidentUpdate):
     params.append(resident_id)
 
     sql = f"UPDATE residents SET {', '.join(updates)} WHERE id = ?"
-    cursor = conn.cursor()
     cursor.execute(sql, params)
     conn.commit()
-
-    if cursor.rowcount == 0:
-        raise HTTPException(status_code=404, detail="居民不存在")
 
     return {"message": "更新成功"}
 
@@ -104,8 +119,12 @@ def update_resident(resident_id: int, data: ResidentUpdate):
 def delete_resident(resident_id: int):
     conn = get_connection()
     cursor = conn.cursor()
+    cursor.execute("SELECT status FROM residents WHERE id = ?", (resident_id,))
+    current = cursor.fetchone()
+    if not current:
+        raise HTTPException(status_code=404, detail="居民不存在")
+    if current["status"] == "merged":
+        raise HTTPException(status_code=409, detail="合并记录不可删除，请保留历史")
     cursor.execute("DELETE FROM residents WHERE id = ?", (resident_id,))
     conn.commit()
-    if cursor.rowcount == 0:
-        raise HTTPException(status_code=404, detail="居民不存在")
     return {"message": "删除成功"}

@@ -123,9 +123,31 @@ CREATE TABLE IF NOT EXISTS residents (
     address TEXT NOT NULL,
     village TEXT NOT NULL,
     household_head TEXT,
+    status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','merged','disabled')),
+    merged_into_id INTEGER REFERENCES residents(id),
+    merged_at TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS resident_merges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id INTEGER NOT NULL REFERENCES residents(id),
+    target_id INTEGER NOT NULL REFERENCES residents(id),
+    source_snapshot_json TEXT NOT NULL,
+    target_before_json TEXT NOT NULL,
+    target_after_json TEXT NOT NULL,
+    field_decisions_json TEXT NOT NULL,
+    moved_affairs_json TEXT NOT NULL,
+    reason TEXT,
+    operator_user_id INTEGER REFERENCES users(id),
+    operator_name TEXT NOT NULL,
+    idempotency_key TEXT UNIQUE,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_resident_merges_source ON resident_merges(source_id);
+CREATE INDEX IF NOT EXISTS idx_resident_merges_target ON resident_merges(target_id);
 
 CREATE TABLE IF NOT EXISTS affairs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -226,6 +248,7 @@ PERMISSIONS = [
     ("departments.write", "维护部门", "departments", "write"),
     ("residents.read", "查看居民", "residents", "read"),
     ("residents.write", "维护居民", "residents", "write"),
+    ("residents.merge", "合并居民档案", "residents", "merge"),
     ("affairs.read", "查看事务", "affairs", "read"),
     ("affairs.write", "办理事务", "affairs", "write"),
     ("petitions.read", "查看信访", "petitions", "read"),
@@ -281,10 +304,24 @@ def transaction(*, immediate: bool = False) -> Iterator[sqlite3.Connection]:
         connection.commit()
 
 
+def _ensure_resident_columns(connection: sqlite3.Connection) -> None:
+    """为既有数据库补齐居民档案合并所需的列（新库已由 SCHEMA 建好）。"""
+    columns = {row[1] for row in connection.execute("PRAGMA table_info(residents)").fetchall()}
+    additions = {
+        "status": "ALTER TABLE residents ADD COLUMN status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','merged','disabled'))",
+        "merged_into_id": "ALTER TABLE residents ADD COLUMN merged_into_id INTEGER REFERENCES residents(id)",
+        "merged_at": "ALTER TABLE residents ADD COLUMN merged_at TEXT",
+    }
+    for column, statement in additions.items():
+        if column not in columns:
+            connection.execute(statement)
+
+
 def init_db() -> None:
     now = to_storage(utc_now())
     with transaction(immediate=True) as connection:
         connection.executescript(SCHEMA)
+        _ensure_resident_columns(connection)
         for code, name, resource, action in PERMISSIONS:
             connection.execute(
                 "INSERT OR IGNORE INTO permissions(code,name,resource,action) VALUES(?,?,?,?)",
