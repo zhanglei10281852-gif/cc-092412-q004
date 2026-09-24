@@ -10,9 +10,12 @@ router = APIRouter(prefix="/affairs", tags=["事务办理"])
 def create_affair(affair: AffairCreate):
     conn = get_connection()
     cursor = conn.cursor()
-    cursor.execute("SELECT id FROM residents WHERE id = ?", (affair.applicant_id,))
-    if not cursor.fetchone():
+    cursor.execute("SELECT id, status FROM residents WHERE id = ?", (affair.applicant_id,))
+    resident = cursor.fetchone()
+    if not resident:
         raise HTTPException(status_code=404, detail="申请人不存在")
+    if resident["status"] != "active":
+        raise HTTPException(status_code=409, detail="该居民档案已合并，不能办理新业务")
 
     cursor.execute(
         """INSERT INTO affairs (title, category, applicant_id, description)

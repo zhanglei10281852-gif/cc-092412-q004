@@ -4,6 +4,8 @@ from typing import Literal
 
 from pydantic import BaseModel, Field, model_validator
 
+MERGEABLE_RESIDENT_FIELDS = ("name", "id_card", "phone", "address", "village", "household_head")
+
 
 class DepartmentCreateRequest(BaseModel):
     name: str = Field(min_length=1, max_length=100)
@@ -50,6 +52,25 @@ class PetitionTransitionRequest(BaseModel):
 
 class UrgeRequest(BaseModel):
     reason: str = Field(min_length=1, max_length=1000)
+
+
+class ResidentMergeRequest(BaseModel):
+    source_id: int = Field(gt=0)
+    target_id: int = Field(gt=0)
+    take_from_source: list[str] = Field(default_factory=list)
+    reason: str = Field(default="", max_length=500)
+    idempotency_key: str = Field(min_length=1, max_length=128)
+
+    @model_validator(mode="after")
+    def validate_merge_payload(self):
+        if self.source_id == self.target_id:
+            raise ValueError("源档案与目标档案不能相同")
+        unknown = [field for field in self.take_from_source if field not in MERGEABLE_RESIDENT_FIELDS]
+        if unknown:
+            raise ValueError(f"不可覆盖的字段：{','.join(sorted(set(unknown)))}")
+        if len(set(self.take_from_source)) != len(self.take_from_source):
+            raise ValueError("覆盖字段存在重复项")
+        return self
 
 
 class MetricWindowRequest(BaseModel):

@@ -123,9 +123,30 @@ CREATE TABLE IF NOT EXISTS residents (
     address TEXT NOT NULL,
     village TEXT NOT NULL,
     household_head TEXT,
+    status TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','merged')),
+    merged_into_id INTEGER REFERENCES residents(id),
+    merged_at TEXT,
     created_at TEXT NOT NULL DEFAULT (datetime('now')),
     updated_at TEXT NOT NULL DEFAULT (datetime('now'))
 );
+
+CREATE TABLE IF NOT EXISTS resident_merges (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    source_id INTEGER NOT NULL REFERENCES residents(id),
+    target_id INTEGER NOT NULL REFERENCES residents(id),
+    source_id_card TEXT NOT NULL,
+    reason TEXT NOT NULL DEFAULT '',
+    field_changes_json TEXT NOT NULL,
+    moved_affairs_json TEXT NOT NULL,
+    operator_user_id INTEGER REFERENCES users(id),
+    operator_name TEXT NOT NULL,
+    idempotency_key TEXT,
+    created_at TEXT NOT NULL
+);
+
+CREATE INDEX IF NOT EXISTS idx_resident_merges_source ON resident_merges(source_id);
+CREATE INDEX IF NOT EXISTS idx_resident_merges_target ON resident_merges(target_id);
+CREATE INDEX IF NOT EXISTS idx_resident_merges_id_card ON resident_merges(source_id_card);
 
 CREATE TABLE IF NOT EXISTS affairs (
     id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -226,6 +247,7 @@ PERMISSIONS = [
     ("departments.write", "维护部门", "departments", "write"),
     ("residents.read", "查看居民", "residents", "read"),
     ("residents.write", "维护居民", "residents", "write"),
+    ("residents.merge", "合并居民档案", "residents", "merge"),
     ("affairs.read", "查看事务", "affairs", "read"),
     ("affairs.write", "办理事务", "affairs", "write"),
     ("petitions.read", "查看信访", "petitions", "read"),
@@ -281,10 +303,22 @@ def transaction(*, immediate: bool = False) -> Iterator[sqlite3.Connection]:
         connection.commit()
 
 
+def _ensure_columns(connection: sqlite3.Connection, table: str, columns: dict[str, str]) -> None:
+    existing = {row[1] for row in connection.execute(f"PRAGMA table_info({table})")}
+    for name, definition in columns.items():
+        if name not in existing:
+            connection.execute(f"ALTER TABLE {table} ADD COLUMN {name} {definition}")
+
+
 def init_db() -> None:
     now = to_storage(utc_now())
     with transaction(immediate=True) as connection:
         connection.executescript(SCHEMA)
+        _ensure_columns(connection, "residents", {
+            "status": "TEXT NOT NULL DEFAULT 'active' CHECK(status IN ('active','merged'))",
+            "merged_into_id": "INTEGER REFERENCES residents(id)",
+            "merged_at": "TEXT",
+        })
         for code, name, resource, action in PERMISSIONS:
             connection.execute(
                 "INSERT OR IGNORE INTO permissions(code,name,resource,action) VALUES(?,?,?,?)",

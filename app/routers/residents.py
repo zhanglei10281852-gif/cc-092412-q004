@@ -2,6 +2,7 @@ from fastapi import APIRouter, HTTPException, Query
 from typing import Optional
 from app.database import get_connection
 from app.models import ResidentCreate, ResidentUpdate
+from app.services.merge import follow_merge_chain
 
 router = APIRouter(prefix="/residents", tags=["居民管理"])
 
@@ -70,12 +71,25 @@ def get_resident(resident_id: int):
     row = cursor.fetchone()
     if not row:
         raise HTTPException(status_code=404, detail="居民不存在")
-    return dict(row)
+    resident = dict(row)
+    if resident.get("status") == "merged":
+        canonical = follow_merge_chain(conn, resident_id)[-1]
+        resident["canonical_id"] = canonical["id"]
+        resident["canonical_name"] = canonical["name"]
+    return resident
 
 
 @router.put("/{resident_id}")
 def update_resident(resident_id: int, data: ResidentUpdate):
     conn = get_connection()
+    cursor = conn.cursor()
+    cursor.execute("SELECT status FROM residents WHERE id = ?", (resident_id,))
+    row = cursor.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="居民不存在")
+    if row["status"] != "active":
+        raise HTTPException(status_code=409, detail="该档案已合并，不能再修改")
+
     updates = []
     params = []
     for field, value in data.model_dump(exclude_unset=True).items():
@@ -90,12 +104,8 @@ def update_resident(resident_id: int, data: ResidentUpdate):
     params.append(resident_id)
 
     sql = f"UPDATE residents SET {', '.join(updates)} WHERE id = ?"
-    cursor = conn.cursor()
     cursor.execute(sql, params)
     conn.commit()
-
-    if cursor.rowcount == 0:
-        raise HTTPException(status_code=404, detail="居民不存在")
 
     return {"message": "更新成功"}
 
@@ -104,8 +114,12 @@ def update_resident(resident_id: int, data: ResidentUpdate):
 def delete_resident(resident_id: int):
     conn = get_connection()
     cursor = conn.cursor()
+    cursor.execute("SELECT status FROM residents WHERE id = ?", (resident_id,))
+    row = cursor.fetchone()
+    if not row:
+        raise HTTPException(status_code=404, detail="居民不存在")
+    if row["status"] != "active":
+        raise HTTPException(status_code=409, detail="该档案已合并，为保留历史不能删除")
     cursor.execute("DELETE FROM residents WHERE id = ?", (resident_id,))
     conn.commit()
-    if cursor.rowcount == 0:
-        raise HTTPException(status_code=404, detail="居民不存在")
     return {"message": "删除成功"}
